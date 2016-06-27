@@ -2,10 +2,11 @@
 
 #include "ZZMatrixElement/MEMCalculators/interface/MEMCalculators.h"
 #include "ZZMatrixElement/MELA/src/computeAngles.h"
-
+#include "ZZMatrixElement/MELA/interface/Mela.h"
 
 MEMCalculatorsWrapper::MEMCalculatorsWrapper(double collisionEnergy, double sKD_mass) {
-    mem_ = new MEMs(collisionEnergy,sKD_mass);
+    mem_ = new MEMs(collisionEnergy,sKD_mass,"CTEQ6L");
+    mela_ = mem_->m_MELA;
 }
 
 MEMCalculatorsWrapper::~MEMCalculatorsWrapper() {
@@ -37,33 +38,6 @@ MEMCalculatorsWrapper::computeAngles(const math::XYZTLorentzVector & Z1_lept1, i
                          TLorentzVector(Z2_lept2.Px(),Z2_lept2.Py(),Z2_lept2.Pz(),Z2_lept2.E()), Z2_lept2Id);
   }
 
-
-void  
-MEMCalculatorsWrapper::computeAll(TLorentzVector Z1_lept1, int Z1_lept1Id,
-		   TLorentzVector Z1_lept2, int Z1_lept2Id,
-		   TLorentzVector Z2_lept1, int Z2_lept1Id,
-		   TLorentzVector Z2_lept2, int Z2_lept2Id) {
-
-    std::vector<TLorentzVector> ps;
-    ps.push_back(Z1_lept1);
-    ps.push_back(Z1_lept2);
-    ps.push_back(Z2_lept1);
-    ps.push_back(Z2_lept2);
-
-
-    std::vector<int> id;
-    id.push_back(Z1_lept1Id);
-    id.push_back(Z1_lept2Id);
-    id.push_back(Z2_lept1Id);
-    id.push_back(Z2_lept2Id);
-
-    mem_->computeMEs(ps,id);
-
-    //Now the SuperKD part
-    pm4l_sig_=0.0;
-    pm4l_bkg_=0.0;
-    mem_->computePm4l(ps,id,kNone,pm4l_sig_,pm4l_bkg_);
-}
 
 std::vector<std::pair<std::string,float>>  
 MEMCalculatorsWrapper::computeNew(
@@ -103,98 +77,49 @@ MEMCalculatorsWrapper::computeNew(
     ret.emplace_back("D_gg",Dgg10_VAMCFM);
     ret.emplace_back("D_0-", D_g4);
 
+    TLorentzVector higgs_undec = partP[0]+partP[1]+partP[2]+partP[3];
+    std::vector<TLorentzVector> partPprod(partP);
+    std::vector<int>            partIdprod(partId);
+    for (const auto &p4 : jets) {
+        partPprod.emplace_back(p4.Px(), p4.Py(), p4.Pz(), p4.E());
+        partIdprod.push_back(0);
+        if (partPprod.size() == 6) break;
+    }
     if (jets.size() >= 2) {
-        std::vector<TLorentzVector> partPprod(partP);
-        std::vector<int>            partIdprod(partId);
-        for (const auto &p4 : jets) {
-            partPprod.emplace_back(p4.Px(), p4.Py(), p4.Pz(), p4.E());
-            partIdprod.push_back(0);
-            if (partPprod.size() == 6) break;
-        }
         double phjj_VAJHU, pvbf_VAJHU;
+        float pwh_hadronic_VAJHU, pzh_hadronic_VAJHU;
         mem_->computeME(MEMNames::kJJ_SMHiggs_GG, MEMNames::kJHUGen,  partPprod, partIdprod, phjj_VAJHU); // SM gg->H+2j
         mem_->computeME(MEMNames::kJJ_SMHiggs_VBF, MEMNames::kJHUGen, partPprod, partIdprod, pvbf_VAJHU);  // SM VBF->H
+
+        mela_->setProcess(TVar::HSMHiggs, TVar::JHUGen, TVar::WH);
+        mela_->computeProdP(partPprod[4], partIdprod[4], partPprod[5], partIdprod[5], higgs_undec, pwh_hadronic_VAJHU);  // SM W(->2j)H
+        mela_->setProcess(TVar::HSMHiggs, TVar::JHUGen, TVar::ZH);
+        mela_->computeProdP(partPprod[4], partIdprod[4], partPprod[5], partIdprod[5], higgs_undec, pzh_hadronic_VAJHU); // SM Z(->2j)H
+
         double Djet_VAJHU = pvbf_VAJHU / ( pvbf_VAJHU + phjj_VAJHU ); // D^VBF_HJJ
+        double D_WHh_VAJHU = pwh_hadronic_VAJHU / ( pwh_hadronic_VAJHU + 100000.*phjj_VAJHU ); // W(->2j)H vs. gg->H+2j
+        double D_ZHh_VAJHU = pzh_hadronic_VAJHU / ( pzh_hadronic_VAJHU + 10000.*phjj_VAJHU ); // Z(->2j)H vs. gg->H+2j
         ret.emplace_back("D_HJJ^VBF", Djet_VAJHU);
+        ret.emplace_back("D_HJJ^WH", D_WHh_VAJHU);
+        ret.emplace_back("D_HJJ^ZH", D_ZHh_VAJHU);
+    } else if (jets.size() == 1) {
+        TLorentzVector nullFourVector(0, 0, 0, 0);
+        float pvbf_VAJHU, pAux_vbf_VAJHU, phj_VAJHU;
+        mela_->setProcess(TVar::HSMHiggs, TVar::JHUGen, TVar::JH);
+        mela_->computeProdP(partPprod[4], partIdprod[4], nullFourVector, 0, higgs_undec, phj_VAJHU); // SM gg->H+1j
+        mela_->setProcess(TVar::HSMHiggs, TVar::JHUGen, TVar::JJVBF);
+        mela_->computeProdP(partPprod[4], partIdprod[4], nullFourVector, 0, higgs_undec, pvbf_VAJHU); // Un-integrated ME
+        mela_->get_PAux(pAux_vbf_VAJHU); // = Integrated / un-integrated
+        double D_VBF1j_VAJHU = pvbf_VAJHU*pAux_vbf_VAJHU / ( pvbf_VAJHU*pAux_vbf_VAJHU + 5.*phj_VAJHU ); // VBF(1j) vs. gg->H+1j
+        ret.emplace_back("D_HJJ^VBF", D_VBF1j_VAJHU);
+        ret.emplace_back("D_HJJ^WH", -1.0);
+        ret.emplace_back("D_HJJ^ZH", -1.0);
     } else {
         ret.emplace_back("D_HJJ^VBF", -1.0);
+        ret.emplace_back("D_HJJ^WH", -1.0);
+        ret.emplace_back("D_HJJ^ZH", -1.0);
     }
 
     return ret;
 }
-
-
-float
-MEMCalculatorsWrapper:: getKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_qqZZ;
-    mem_->computeKD(kSMHiggs, kJHUGen, kqqZZ, kMCFM, &MEMs::probRatio, KD, ME_ggHiggs, ME_qqZZ);
-    return KD;
-}
-
-float
-MEMCalculatorsWrapper:: getSuperKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_qqZZ;
-    mem_->computeKD(kSMHiggs, kJHUGen, kqqZZ, kMCFM, &MEMs::probRatio, KD, ME_ggHiggs, ME_qqZZ);
-    return pm4l_sig_/(pm4l_sig_+pm4l_bkg_*(1./KD-1));
-}
-
-float
-MEMCalculatorsWrapper:: getGG0KD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_gg0Minus;
-    mem_->computeKD(kSMHiggs, kJHUGen, k0minus, kJHUGen, &MEMs::probRatio, KD, ME_ggHiggs, ME_gg0Minus);
-    return KD;
-}
-
-float
-MEMCalculatorsWrapper:: getGG0HKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_gg0hPlus;
-    mem_->computeKD(kSMHiggs, kJHUGen, k0hplus, kJHUGen, &MEMs::probRatio, KD, ME_ggHiggs, ME_gg0hPlus);
-    return KD;
-}
-
-float
-MEMCalculatorsWrapper:: getQQ1MinusKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_qq1Minus;
-    mem_->computeKD(kSMHiggs, kJHUGen, k1minus, kJHUGen, &MEMs::probRatio, KD, ME_ggHiggs, ME_qq1Minus);
-    return KD;
-}
-
-float
-MEMCalculatorsWrapper:: getQQ1PlusKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_qq2Plus;
-    mem_->computeKD(kSMHiggs, kJHUGen, k1plus, kJHUGen, &MEMs::probRatio, KD, ME_ggHiggs, ME_qq2Plus);
-    return KD;
-}
-
-float
-MEMCalculatorsWrapper:: getGG2PlusKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_gg2Plus;
-    mem_->computeKD(kSMHiggs, kJHUGen, k2mplus_gg, kJHUGen, &MEMs::probRatio, KD, ME_ggHiggs, ME_gg2Plus);
-    return KD;
-}
-
-float
-MEMCalculatorsWrapper:: getQQ2PlusKD() {
-    using namespace MEMNames;
-    double KD,ME_ggHiggs,ME_qq2Plus;
-    mem_->computeKD(kSMHiggs, kJHUGen, k2mplus_qqbar, kJHUGen, &MEMs::probRatio, KD, ME_ggHiggs, ME_qq2Plus);
-    return KD;
-}
-
-
-
-float
-MEMCalculatorsWrapper:: getInterferenceWeight() {
-    return mem_->getMELAWeight();
-}
-
-
-
 
